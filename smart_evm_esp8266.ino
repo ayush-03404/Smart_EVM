@@ -63,11 +63,11 @@ WebSocketsClient webSocket;
 
 // TTP223 INPUTS
 const uint8_t TOUCH_PINS[5] = {
-  D1,
-  D2,
   D5,
   D6,
-  D7
+  D7,
+   3,
+   1,
 };
 
 // Candidate IDs
@@ -164,8 +164,6 @@ void websocketEvent(WStype_t type, uint8_t * payload, size_t length);
 
 void setup() {
 
-  Serial.begin(115200);
-
   // INPUTS
   for (int i = 0; i < 5; i++) {
     pinMode(TOUCH_PINS[i], INPUT);
@@ -225,11 +223,6 @@ void setupWiFi() {
   WiFi.softAP(AP_SSID, AP_PASSWORD);
 
   delay(500);
-
-  Serial.println();
-  Serial.println("SoftAP Started");
-  Serial.print("ESP IP: ");
-  Serial.println(WiFi.softAPIP());
 
   lcd.clear();
   lcd.setCursor(0, 0);
@@ -368,9 +361,6 @@ void startTouchVerification(int candidateID) {
 
   buzzerShort();
 
-  Serial.print("Touch Started -> Candidate ");
-  Serial.println(candidateID);
-
   updateLCD();
 }
 
@@ -418,9 +408,6 @@ void acceptVote() {
 
   lcd.setCursor(0, 1);
   lcd.print("ACCEPTED");
-
-  Serial.print("Vote Accepted -> Candidate ");
-  Serial.println(activeCandidate);
 
   currentState = VOTE_ACCEPTED;
 }
@@ -490,7 +477,6 @@ void sendVotePacket(int candidateID) {
 
   webSocket.sendTXT(jsonString);
 
-  Serial.println(jsonString);
 }
 
 // ====================================================
@@ -510,7 +496,6 @@ void sendErrorPacket(const char* reason) {
 
   webSocket.sendTXT(jsonString);
 
-  Serial.println(jsonString);
 }
 
 // ====================================================
