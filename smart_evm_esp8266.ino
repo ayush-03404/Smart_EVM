@@ -93,7 +93,7 @@ const uint8_t BUZZER_PIN = D8;
 
 const unsigned long TOUCH_DURATION = 5000;
 const unsigned long LOCKOUT_DURATION = 10000;
-const unsigned long lastLockedErrorTime = 0;
+unsigned long lastLockedErrorTime = 0;
 
 // ====================================================
 // SYSTEM STATES
