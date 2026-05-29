@@ -93,6 +93,7 @@ const uint8_t BUZZER_PIN = D8;
 
 const unsigned long TOUCH_DURATION = 5000;
 const unsigned long LOCKOUT_DURATION = 10000;
+const unsigned long lastLockedErrorTime = 0;
 
 // ====================================================
 // SYSTEM STATES
@@ -167,10 +168,10 @@ void setup() {
   // INPUTS
   for (int i = 0; i < 5; i++) {
     pinMode(TOUCH_PINS[i], INPUT);
-    pinMode(1, INPUT);
-    pinMode(3, INPUT);
   }
-
+  pinMode(1, INPUT);
+  pinMode(3, INPUT);
+  
   // OUTPUTS
   pinMode(GREEN_LED, OUTPUT);
   pinMode(RED_LED, OUTPUT);
@@ -312,9 +313,10 @@ void handleStateMachine() {
       break;
 
     case LOCKOUT:
+      handleTouchInputs();
       handleLockout();
       break;
-  }
+    }
 }
 
 // ====================================================
@@ -331,9 +333,14 @@ void handleTouchInputs() {
 
       if (locked) {
 
-        sendErrorPacket("locked");
+        if (millis() - lastLockedErrorTime > 1000) {
 
-        buzzerChirp();
+            lastLockedErrorTime = millis();
+
+            sendErrorPacket("locked");
+
+            buzzerChirp();
+        }
 
         return;
       }
@@ -570,8 +577,7 @@ void updateLEDs() {
       break;
 
     case LOCKOUT:
-      handleTouchInputs();
-      handleLockout();
+      digitalWrite(RED_LED, HIGH);
       break;
 
     default:
