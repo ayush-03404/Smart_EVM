@@ -279,31 +279,27 @@ void handleStateMachine() {
       handleTouchInputs();
       break;
 
-    case TOUCH_VERIFY:
-
+    case TOUCH_VERIFY: {
+      
       if (activeCandidate == -1) {
         cancelTouch();
         return;
       }
 
-      // Verify continuous touch
       if (digitalRead(TOUCH_PINS[activeCandidate - 1]) == LOW) {
-
         cancelTouch();
         return;
       }
 
-      unsigned long elapsed =
-        millis() - touchStartTime;
+      unsigned long elapsed = millis() - touchStartTime;
 
       if (elapsed >= TOUCH_DURATION) {
-
         acceptVote();
       }
 
       updateLCD();
-
       break;
+    }
 
     case VOTE_ACCEPTED:
       startLockout();
@@ -313,7 +309,7 @@ void handleStateMachine() {
       handleTouchInputs();
       handleLockout();
       break;
-    }
+  }
 }
 
 // ====================================================
