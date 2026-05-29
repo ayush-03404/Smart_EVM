@@ -362,11 +362,11 @@ Save the complete election results to an Excel spreadsheet (.xlsx).
 
 | Touch Button | ESP8266 Pin | Candidate slot |
 |---|---|---|
-| Button 1 | D1 | Candidate 1 |
-| Button 2 | D2 | Candidate 2 |
-| Button 3 | D5 | Candidate 3 |
-| Button 4 | D6 | Candidate 4 |
-| Button 5 | D7 | Candidate 5 |
+| Button 1 | D5 | Candidate 1 |
+| Button 2 | D6 | Candidate 2 |
+| Button 3 | D7 | Candidate 3 |
+| Button 4 | RX(3) | Candidate 4 |
+| Button 5 | TX(1) | Candidate 5 |
 
 Each TTP223 sensor: **VCC → 3.3V**, **GND → GND**, **OUT → pin above**
 
