@@ -362,11 +362,11 @@ Save the complete election results to an Excel spreadsheet (.xlsx).
 
 | Touch Button | ESP8266 Pin | Candidate slot |
 |---|---|---|
-| Button 1 | D5 | Candidate 1 |
-| Button 2 | D6 | Candidate 2 |
-| Button 3 | D7 | Candidate 3 |
-| Button 4 | RX(3) | Candidate 4 |
-| Button 5 | TX(1) | Candidate 5 |
+| Button 1 | D3 | Candidate 1 |
+| Button 2 | D4 | Candidate 2 |
+| Button 3 | D5 | Candidate 3 |
+| Button 4 | D6 | Candidate 4 |
+| Button 5 | D7 | Candidate 5 |
 
 Each TTP223 sensor: **VCC → 3.3V**, **GND → GND**, **OUT → pin above**
 
@@ -375,8 +375,8 @@ Each TTP223 sensor: **VCC → 3.3V**, **GND → GND**, **OUT → pin above**
 | LED colour | ESP8266 Pin | When it is on |
 |---|---|---|
 | Green | D0 | Idle — ready for a vote |
-| Blue | D4 | Verifying a touch (countdown in progress) |
-| Red | D3 | Lockout — machine waiting between votes |
+| Blue | 03 RX | Verifying a touch (countdown in progress) |
+| Red | 01 TX | Lockout — machine waiting between votes |
 
 ### Other Components
 
