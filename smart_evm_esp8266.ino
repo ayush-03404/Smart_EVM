@@ -1,28 +1,3 @@
-/*
-====================================================
-SMART EVM - ESP8266 Firmware
-====================================================
-
-ARCHITECTURE RULES:
-- ESP handles ONLY:
-    - touch sensing
-    - 5s validation
-    - 10s lockout
-    - LCD feedback
-    - LED feedback
-    - buzzer feedback
-    - WebSocket communication
-
-- ESP DOES NOT:
-    - store candidate names
-    - count votes permanently
-    - generate results
-    - handle database
-    - perform analytics
-
-====================================================
-*/
-
 #include <ESP8266WiFi.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
@@ -30,56 +5,39 @@ ARCHITECTURE RULES:
 #include <LiquidCrystal_I2C.h>
 
 // ====================================================
-// WIFI CONFIGURATION
+// WIFI
 // ====================================================
 
 const char* AP_SSID = "SMART_EVM";
 const char* AP_PASSWORD = "12345678";
 
-// PC APPLICATION IP
 IPAddress serverIP(192, 168, 4, 2);
-
-// WebSocket Port
 const uint16_t WS_PORT = 8765;
 
 // ====================================================
-// LCD
+// LCD (D1=SCL, D2=SDA)
 // ====================================================
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
 // ====================================================
-// WEBSOCKET
+// WS
 // ====================================================
 
 WebSocketsClient webSocket;
 
 // ====================================================
-// GPIO DEFINITIONS
+// PINS (FIXED STRUCTURE)
 // ====================================================
 
-// TTP223 INPUTS
-const uint8_t TOUCH_PINS[5] = {
-  D5,
-  D6,
-  D7,
-   3,
-   1
-};
+// Candidates ONLY (NO boot conflict pins)
+const uint8_t TOUCH_PINS[5] = { D3, D4, D5, D6, D7 };
+const uint8_t CANDIDATE_IDS[5] = { 1, 2, 3, 4, 5 };
 
-// Candidate IDs
-const uint8_t CANDIDATE_IDS[5] = {
-  1,
-  2,
-  3,
-  4,
-  5
-};
-
-// LEDs
-const uint8_t GREEN_LED = D0;
-const uint8_t RED_LED   = D3;
-const uint8_t BLUE_LED  = D4;
+// LEDs on safe UART pins (careful but usable if debug disabled)
+const uint8_t LED1 =  3;   // GPIO3
+const uint8_t LED2 =  1;   // GPIO1
+const uint8_t LED3 = D0;
 
 // Buzzer
 const uint8_t BUZZER_PIN = D8;
@@ -88,73 +46,49 @@ const uint8_t BUZZER_PIN = D8;
 // TIMING
 // ====================================================
 
-const unsigned long TOUCH_DURATION = 5000;
-const unsigned long LOCKOUT_DURATION = 10000;
-unsigned long lastLockedErrorTime = 0;
+const unsigned long HOLD_TIME = 5000;
+const unsigned long LOCKOUT_TIME = 10000;
+const unsigned long DEBOUNCE_MS = 20;
 
 // ====================================================
-// SYSTEM STATES
+// STATE
 // ====================================================
 
-enum SystemState {
-  IDLE,
-  TOUCH_VERIFY,
-  VOTE_ACCEPTED,
-  LOCKOUT
-};
-
-SystemState currentState = IDLE;
+enum State { IDLE, VERIFY, LOCKOUT };
+State state = IDLE;
 
 // ====================================================
-// TOUCH VARIABLES
+// VARIABLES
 // ====================================================
 
-bool touchActive = false;
-unsigned long touchStartTime = 0;
-int activeCandidate = -1;
+int activeID = -1;
+unsigned long pressStart = 0;
+unsigned long lockStart = 0;
+unsigned long lastLCD = 0;
+
+bool lastStable[5] = {0};
+bool lastRaw[5] = {0};
+unsigned long lastChange[5] = {0};
 
 // ====================================================
-// LOCKOUT VARIABLES
+// DEBOUNCED READ (CRITICAL FIX)
 // ====================================================
 
-bool locked = false;
-unsigned long lockoutStartTime = 0;
+bool readStable(uint8_t pin, int i) {
 
-// ====================================================
-// TIMERS
-// ====================================================
+  bool raw = digitalRead(pin);
 
-unsigned long lastLCDUpdate = 0;
+  if (raw != lastRaw[i]) {
+    lastChange[i] = millis();
+    lastRaw[i] = raw;
+  }
 
-// ====================================================
-// FUNCTION DECLARATIONS
-// ====================================================
+  if (millis() - lastChange[i] > DEBOUNCE_MS) {
+    lastStable[i] = raw;
+  }
 
-void setupWiFi();
-void setupWebSocket();
-
-void handleTouchInputs();
-void handleStateMachine();
-
-void startTouchVerification(int candidateID);
-void cancelTouch();
-void acceptVote();
-
-void startLockout();
-void handleLockout();
-
-void sendVotePacket(int candidateID);
-void sendErrorPacket(const char* reason);
-
-void updateLCD();
-void updateLEDs();
-
-void buzzerShort();
-void buzzerDouble();
-void buzzerLong();
-void buzzerChirp();
-
-void websocketEvent(WStype_t type, uint8_t * payload, size_t length);
+  return lastStable[i];
+}
 
 // ====================================================
 // SETUP
@@ -162,450 +96,156 @@ void websocketEvent(WStype_t type, uint8_t * payload, size_t length);
 
 void setup() {
 
-  // INPUTS
+  // IMPORTANT: prevent floating inputs
   for (int i = 0; i < 5; i++) {
-    pinMode(TOUCH_PINS[i], INPUT);
+    pinMode(TOUCH_PINS[i], INPUT_PULLUP);
   }
-  pinMode(1, INPUT);
-  pinMode(3, INPUT);
-  
-  // OUTPUTS
-  pinMode(GREEN_LED, OUTPUT);
-  pinMode(RED_LED, OUTPUT);
-  pinMode(BLUE_LED, OUTPUT);
 
+  pinMode(LED1, OUTPUT);
+  pinMode(LED2, OUTPUT);
+  pinMode(LED3, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
 
-  // LCD
   Wire.begin(D2, D1);
   lcd.init();
   lcd.backlight();
 
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("SMART EVM");
-  lcd.setCursor(0, 1);
-  lcd.print("Booting...");
+  lcd.print("SMART EVM BOOT");
 
-  // WiFi
-  setupWiFi();
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAP(AP_SSID, AP_PASSWORD);
 
-  // WebSocket
-  setupWebSocket();
+  webSocket.begin(serverIP.toString(), WS_PORT, "/");
+  webSocket.setReconnectInterval(5000);
 
-  delay(1000);
+  delay(800);
 
-  currentState = IDLE;
-
-  updateLCD();
+  state = IDLE;
 }
 
 // ====================================================
-// MAIN LOOP
+// LOOP
 // ====================================================
 
 void loop() {
 
   webSocket.loop();
 
-  handleStateMachine();
+  switch (state) {
+
+    case IDLE:
+      scanTouches();
+      break;
+
+    case VERIFY:
+      verifyHold();
+      break;
+
+    case LOCKOUT:
+      handleLockout();
+      break;
+  }
 
   updateLEDs();
 }
 
 // ====================================================
-// WIFI SETUP
+// TOUCH SCAN (FIXED EDGE TRIGGER)
 // ====================================================
 
-void setupWiFi() {
-
-  WiFi.mode(WIFI_AP_STA);
-
-  WiFi.softAP(AP_SSID, AP_PASSWORD);
-
-  delay(500);
-
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("SoftAP Ready");
-  lcd.setCursor(0, 1);
-  lcd.print(WiFi.softAPIP());
-}
-
-// ====================================================
-// WEBSOCKET SETUP
-// ====================================================
-
-void setupWebSocket() {
-
-  webSocket.begin(serverIP.toString(), WS_PORT, "/");
-
-  webSocket.onEvent(websocketEvent);
-
-  webSocket.setReconnectInterval(5000);
-}
-
-// ====================================================
-// WEBSOCKET EVENTS
-// ====================================================
-
-void websocketEvent(WStype_t type, uint8_t * payload, size_t length) {
-
-  switch(type) {
-
-    case WStype_DISCONNECTED:
-      break;
-
-    case WStype_CONNECTED:
-      break;
-
-    case WStype_TEXT:
-      break;
-
-    default:
-      break;
-  }
-}
-
-// ====================================================
-// STATE MACHINE
-// ====================================================
-
-void handleStateMachine() {
-
-  switch(currentState) {
-
-    case IDLE:
-      handleTouchInputs();
-      break;
-
-    case TOUCH_VERIFY: {
-      
-      if (activeCandidate == -1) {
-        cancelTouch();
-        return;
-      }
-
-      if (digitalRead(TOUCH_PINS[activeCandidate - 1]) == LOW) {
-        cancelTouch();
-        return;
-      }
-
-      unsigned long elapsed = millis() - touchStartTime;
-
-      if (elapsed >= TOUCH_DURATION) {
-        acceptVote();
-      }
-
-      updateLCD();
-      break;
-    }
-
-    case VOTE_ACCEPTED:
-      startLockout();
-      break;
-
-    case LOCKOUT:
-      handleTouchInputs();
-      handleLockout();
-      break;
-  }
-}
-
-// ====================================================
-// TOUCH INPUT HANDLING
-// ====================================================
-
-void handleTouchInputs() {
+void scanTouches() {
 
   for (int i = 0; i < 5; i++) {
 
-    bool touched = digitalRead(TOUCH_PINS[i]);
+    bool pressed = !readStable(TOUCH_PINS[i], i); // ACTIVE LOW
 
-    if (touched) {
+    if (pressed && activeID == -1) {
 
-      if (locked) {
+      activeID = CANDIDATE_IDS[i];
+      pressStart = millis();
+      state = VERIFY;
 
-        if (millis() - lastLockedErrorTime > 1000) {
-
-            lastLockedErrorTime = millis();
-
-            sendErrorPacket("locked");
-
-            buzzerChirp();
-        }
-
-        return;
-      }
-
-      startTouchVerification(CANDIDATE_IDS[i]);
-
+      tone(BUZZER_PIN, 2000, 80);
       return;
     }
   }
 }
 
 // ====================================================
-// START TOUCH VERIFICATION
+// VERIFY HOLD
 // ====================================================
 
-void startTouchVerification(int candidateID) {
+void verifyHold() {
 
-  touchActive = true;
+  int index = activeID - 1;
 
-  activeCandidate = candidateID;
+  bool stillPressed = !digitalRead(TOUCH_PINS[index]);
 
-  touchStartTime = millis();
+  if (!stillPressed) {
+    resetToIdle();
+    return;
+  }
 
-  currentState = TOUCH_VERIFY;
-
-  buzzerShort();
-
-  updateLCD();
+  if (millis() - pressStart >= HOLD_TIME) {
+    acceptVote();
+  }
 }
 
 // ====================================================
-// CANCEL TOUCH
-// ====================================================
-
-void cancelTouch() {
-
-  sendErrorPacket("cancelled");
-
-  buzzerLong();
-
-  touchActive = false;
-
-  activeCandidate = -1;
-
-  currentState = IDLE;
-
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("TOUCH");
-  lcd.setCursor(0, 1);
-  lcd.print("CANCELLED");
-
-  delay(1000);
-
-  updateLCD();
-}
-
-// ====================================================
-// ACCEPT VOTE
+// ACCEPT VOTE (NO SPAM FIX)
 // ====================================================
 
 void acceptVote() {
 
-  sendVotePacket(activeCandidate);
+  StaticJsonDocument<128> doc;
+  doc["type"] = "vote";
+  doc["candidate_id"] = activeID;
 
-  buzzerDouble();
+  String out;
+  serializeJson(doc, out);
+  webSocket.sendTXT(out);
+
+  tone(BUZZER_PIN, 2500, 120);
 
   lcd.clear();
+  lcd.print("VOTE ACCEPTED");
 
-  lcd.setCursor(0, 0);
-  lcd.print("VOTE");
-
-  lcd.setCursor(0, 1);
-  lcd.print("ACCEPTED");
-
-  currentState = VOTE_ACCEPTED;
+  state = LOCKOUT;
+  lockStart = millis();
 }
 
 // ====================================================
-// START LOCKOUT
-// ====================================================
-
-void startLockout() {
-
-  locked = true;
-
-  lockoutStartTime = millis();
-
-  currentState = LOCKOUT;
-}
-
-// ====================================================
-// HANDLE LOCKOUT
+// LOCKOUT
 // ====================================================
 
 void handleLockout() {
 
-  unsigned long elapsed =
-    millis() - lockoutStartTime;
-
-  unsigned long remaining =
-    (LOCKOUT_DURATION - elapsed) / 1000;
-
-  lcd.clear();
-
-  lcd.setCursor(0, 0);
-  lcd.print("PLEASE WAIT");
-
-  lcd.setCursor(0, 1);
-  lcd.print(remaining);
-  lcd.print(" Seconds");
-
-  if (elapsed >= LOCKOUT_DURATION) {
-
-    locked = false;
-
-    touchActive = false;
-
-    activeCandidate = -1;
-
-    currentState = IDLE;
-
-    updateLCD();
+  if (millis() - lockStart > LOCKOUT_TIME) {
+    resetToIdle();
   }
 }
 
 // ====================================================
-// SEND VOTE PACKET
+// RESET
 // ====================================================
 
-void sendVotePacket(int candidateID) {
+void resetToIdle() {
 
-  StaticJsonDocument<128> doc;
-
-  doc["type"] = "vote";
-  doc["candidate_id"] = candidateID;
-
-  String jsonString;
-
-  serializeJson(doc, jsonString);
-
-  webSocket.sendTXT(jsonString);
-
+  activeID = -1;
+  state = IDLE;
 }
 
 // ====================================================
-// SEND ERROR PACKET
-// ====================================================
-
-void sendErrorPacket(const char* reason) {
-
-  StaticJsonDocument<128> doc;
-
-  doc["type"] = "error";
-  doc["reason"] = reason;
-
-  String jsonString;
-
-  serializeJson(doc, jsonString);
-
-  webSocket.sendTXT(jsonString);
-
-}
-
-// ====================================================
-// LCD UPDATE
-// ====================================================
-
-void updateLCD() {
-
-  if (millis() - lastLCDUpdate < 200)
-    return;
-
-  lastLCDUpdate = millis();
-
-  switch(currentState) {
-
-    case IDLE:
-
-      lcd.clear();
-
-      lcd.setCursor(0, 0);
-      lcd.print("READY TO VOTE");
-
-      lcd.setCursor(0, 1);
-      lcd.print("Hold 5 Seconds");
-
-      break;
-
-    case TOUCH_VERIFY: {
-
-      unsigned long elapsed =
-        millis() - touchStartTime;
-
-      float seconds =
-        elapsed / 1000.0;
-
-      lcd.clear();
-
-      lcd.setCursor(0, 0);
-      lcd.print("VERIFYING");
-
-      lcd.setCursor(0, 1);
-
-      lcd.print(seconds, 1);
-      lcd.print("/5.0s");
-
-      break;
-    }
-
-    default:
-      break;
-  }
-}
-
-// ====================================================
-// LED CONTROL
+// LEDS
 // ====================================================
 
 void updateLEDs() {
 
-  digitalWrite(GREEN_LED, LOW);
-  digitalWrite(RED_LED, LOW);
-  digitalWrite(BLUE_LED, LOW);
+  digitalWrite(LED1, LOW);
+  digitalWrite(LED2, LOW);
+  digitalWrite(LED3, LOW);
 
-  switch(currentState) {
-
-    case IDLE:
-      digitalWrite(GREEN_LED, HIGH);
-      break;
-
-    case TOUCH_VERIFY:
-      digitalWrite(BLUE_LED, HIGH);
-      break;
-
-    case LOCKOUT:
-      digitalWrite(RED_LED, HIGH);
-      break;
-
-    default:
-      break;
-  }
-}
-
-// ====================================================
-// BUZZER FUNCTIONS
-// ====================================================
-
-void buzzerShort() {
-
-  tone(BUZZER_PIN, 2000, 100);
-}
-
-void buzzerDouble() {
-
-  tone(BUZZER_PIN, 2500, 100);
-
-  delay(150);
-
-  tone(BUZZER_PIN, 2500, 100);
-}
-
-void buzzerLong() {
-
-  tone(BUZZER_PIN, 1000, 500);
-}
-
-void buzzerChirp() {
-
-  tone(BUZZER_PIN, 3000, 50);
-
-  delay(70);
-
-  tone(BUZZER_PIN, 3000, 50);
+  if (state == IDLE) digitalWrite(LED3, HIGH);
+  if (state == VERIFY) digitalWrite(LED1, HIGH);
+  if (state == LOCKOUT) digitalWrite(LED2, HIGH);
 }
