@@ -67,7 +67,7 @@ const uint8_t TOUCH_PINS[5] = {
   D6,
   D7,
    3,
-   1,
+   1
 };
 
 // Candidate IDs
@@ -167,6 +167,8 @@ void setup() {
   // INPUTS
   for (int i = 0; i < 5; i++) {
     pinMode(TOUCH_PINS[i], INPUT);
+    pinMode(1, INPUT);
+    pinMode(3, INPUT);
   }
 
   // OUTPUTS
@@ -177,6 +179,7 @@ void setup() {
   pinMode(BUZZER_PIN, OUTPUT);
 
   // LCD
+  Wire.begin(D2, D1);
   lcd.init();
   lcd.backlight();
 
@@ -253,15 +256,12 @@ void websocketEvent(WStype_t type, uint8_t * payload, size_t length) {
   switch(type) {
 
     case WStype_DISCONNECTED:
-      Serial.println("WebSocket Disconnected");
       break;
 
     case WStype_CONNECTED:
-      Serial.println("WebSocket Connected");
       break;
 
     case WStype_TEXT:
-      Serial.printf("Received: %s\n", payload);
       break;
 
     default:
@@ -570,7 +570,8 @@ void updateLEDs() {
       break;
 
     case LOCKOUT:
-      digitalWrite(RED_LED, HIGH);
+      handleTouchInputs();
+      handleLockout();
       break;
 
     default:
