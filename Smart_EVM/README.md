@@ -8,7 +8,7 @@ A complete electronic voting system built with an **ESP8266 microcontroller** an
 
 ---
 
-## ✅ ESP8266 Firmware Compatibility (v1.4)
+## ✅ ESP8266 Firmware Compatibility 
 
 **The firmware in this repo is 100% compatible with the desktop app.**
 
