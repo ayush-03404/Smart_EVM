@@ -1,6 +1,6 @@
 /*
  * ============================================================
- *  SMART EVM — ESP8266 Firmware  v1.1
+ *  SMART EVM — ESP8266 Firmware  v1.4
  * ============================================================
  *
  *  HOW IT WORKS
@@ -11,9 +11,10 @@
  *  3. Launch the SMART EVM desktop app on the PC
  *     (WebSocket server starts automatically on port 8765)
  *  4. ESP8266 auto-connects — 3 beeps confirm it is live
- *  5. Press any candidate button to cast a vote
- *     Blue LED flashes + buzzer beeps to confirm each vote
- *     2-second lockout prevents accidental double-votes
+ *  5. Hold any candidate button for 2 seconds to cast a vote
+ *     Two-beep confirmation + LED flash on confirmed vote
+ *     10-second lockout prevents double-votes
+ *     False vote attempt → 3-second continuous alarm
  *
  *  WIRING
  *  ─────────────────────────────────────────────────────────
@@ -22,8 +23,19 @@
  *  Candidate 3 button : D5 (GPIO14) → GND
  *  Candidate 4 button : D6 (GPIO12) → GND
  *  Candidate 5 button : D7 (GPIO13) → GND
- *  Blue LED (+)       : D4 (GPIO2)  → 220Ω → GND
+ *  Blue LED (+)       : D4 (GPIO2)  → 220Ω → GND (HIGH=ON)
  *  Active buzzer (+)  : D8 (GPIO15) → GND  (buzzer − to GND)
+ *
+ *  BUZZER NOTE
+ *  ─────────────────────────────────────────────────────────
+ *  GPIO15 (D8) has an onboard 10 kΩ pull-down resistor.
+ *  For best results wire an NPN transistor (e.g. 2N2222):
+ *    ESP D8 → 1 kΩ → Base
+ *    Collector → Buzzer(+) → 3.3 V
+ *    Emitter → GND
+ *  Direct wiring also works for most active buzzers — if the
+ *  buzzer is silent, swap its + and − legs (some modules have
+ *  reversed markings).
  *
  *  REQUIRED LIBRARY
  *  ─────────────────────────────────────────────────────────
@@ -53,10 +65,10 @@ const char*    AP_PASSWORD = "12345678";   // min 8 chars; "" = open network
 const char*    WS_HOST = "192.168.4.2";   // PC's IP on this AP (always .2)
 const uint16_t WS_PORT = 8765;            // must match SMART EVM app
 
-const unsigned long VOTE_LOCKOUT_MS = 2000; // ms buttons locked after a vote
-const unsigned long DEBOUNCE_MS     = 50;   // ms for button debounce
-const unsigned long BEEP_MS         = 150;  // ms buzzer on per vote
-const unsigned long BLINK_MS        = 300;  // ms LED on per vote
+const unsigned long VOTE_LOCKOUT_MS     = 10000; // 10-second lockout after confirmed vote
+const unsigned long HOLD_REQUIRED_MS    = 2000;  // must hold 2 s to confirm vote
+const unsigned long DEBOUNCE_MS         = 50;    // ms for button debounce
+const unsigned long FALSE_VOTE_ALARM_MS = 3000;  // 3-second alarm for false vote / spam
 
 // ============================================================
 //  PIN DEFINITIONS
@@ -84,13 +96,26 @@ uint32_t btnChangedAt[5] = { 0, 0, 0, 0, 0 };
 bool     voteLocked   = false;
 uint32_t lockoutStart = 0;
 
-// Non-blocking LED / buzzer timers (0 = not scheduled)
-uint32_t ledOffAt    = 0;
-uint32_t buzzerOffAt = 0;
+// Non-blocking LED timer (0 = off/not scheduled)
+uint32_t ledOffAt = 0;
+
+// NEW: Non-blocking multi-beep sequencer
+// Plays a sequence of (onMs, offMs) pairs without using delay().
+struct BeepStep { uint16_t onMs; uint16_t offMs; };
+static BeepStep beepQueue[8];
+static int      beepQueueLen  = 0;
+static int      beepQueueIdx  = 0;
+static uint32_t beepStepEnd   = 0;
+static bool     beepStepIsOn  = false;
 
 // Slow status blink while disconnected
 uint32_t statusBlinkAt  = 0;
 bool     statusLedState = false;
+
+// NEW: Hold-to-vote logic
+int      holdCandidate  = -1;   // 0-based index of button being held (-1 = none)
+uint32_t holdStartedAt  = 0;
+bool     holdFired      = false;
 
 // ============================================================
 //  HELPERS
@@ -108,6 +133,54 @@ void beepSync(int count, int onMs, int offMs) {
   }
 }
 
+// NEW: Schedule a non-blocking beep sequence.
+// Pass pairs: onMs, offMs, onMs, offMs ... (max 8 steps total pairs).
+// For a continuous alarm pass one step with a large onMs and offMs=0.
+void scheduleBeep(BeepStep* steps, int count) {
+  memcpy(beepQueue, steps, count * sizeof(BeepStep));
+  beepQueueLen = count;
+  beepQueueIdx = 0;
+  // Start immediately: turn buzzer ON for first step
+  buzzerSet(true);
+  beepStepIsOn = true;
+  beepStepEnd  = millis() + steps[0].onMs;
+}
+
+// NEW: Tick the beep sequencer — call every loop iteration
+void tickBeep(uint32_t now) {
+  if (beepQueueLen == 0) return;
+  if (now < beepStepEnd)  return;   // still in current phase
+
+  if (beepStepIsOn) {
+    // ON phase done — start OFF phase
+    buzzerSet(false);
+    beepStepIsOn = false;
+    uint16_t offMs = beepQueue[beepQueueIdx].offMs;
+    if (offMs == 0 || beepQueueIdx >= beepQueueLen - 1) {
+      // No off-phase or last step — sequence complete
+      beepQueueLen = 0;
+      return;
+    }
+    beepStepEnd = now + offMs;
+  } else {
+    // OFF phase done — advance to next step
+    beepQueueIdx++;
+    if (beepQueueIdx >= beepQueueLen) {
+      beepQueueLen = 0;   // sequence finished
+      return;
+    }
+    buzzerSet(true);
+    beepStepIsOn = true;
+    beepStepEnd  = now + beepQueue[beepQueueIdx].onMs;
+  }
+}
+
+// NEW: Stop any running beep sequence immediately
+void cancelBeep() {
+  beepQueueLen = 0;
+  buzzerSet(false);
+}
+
 void sendVote(int candidateId) {
   char buf[64];
   snprintf(buf, sizeof(buf),
@@ -120,6 +193,22 @@ void sendError(const char* reason) {
   char buf[96];
   snprintf(buf, sizeof(buf),
            "{\"type\":\"error\",\"reason\":\"%s\"}", reason);
+  ws.sendTXT(buf);
+  Serial.print("[TX] "); Serial.println(buf);
+}
+
+void sendHoldStart(int candidateId) {
+  char buf[64];
+  snprintf(buf, sizeof(buf),
+           "{\"type\":\"hold_start\",\"candidate_id\":%d}", candidateId);
+  ws.sendTXT(buf);
+  Serial.print("[TX] "); Serial.println(buf);
+}
+
+void sendHoldCancel(int candidateId) {
+  char buf[64];
+  snprintf(buf, sizeof(buf),
+           "{\"type\":\"hold_cancel\",\"candidate_id\":%d}", candidateId);
   ws.sendTXT(buf);
   Serial.print("[TX] "); Serial.println(buf);
 }
@@ -145,7 +234,6 @@ void wsEvent(WStype_t type, uint8_t* payload, size_t len) {
       break;
 
     case WStype_TEXT:
-      // PC can optionally send messages; log them
       Serial.printf("[WS RX] %s\n", (char*)payload);
       break;
 
@@ -165,7 +253,7 @@ void wsEvent(WStype_t type, uint8_t* payload, size_t len) {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\n=== SMART EVM — ESP8266 v1.1 ===");
+  Serial.println("\n=== SMART EVM — ESP8266 v1.4 ===");
 
   // ── Pins ──────────────────────────────────────────────────
   for (int i = 0; i < 5; i++) {
@@ -176,18 +264,17 @@ void setup() {
   ledSet(false);
   buzzerSet(false);
 
-  // Power-on tone — confirms the board is alive
-  beepSync(1, 300, 0);
-  delay(400);
+  // Power-on buzzer test — two 400 ms beeps confirm hardware is alive.
+  // If you hear these but not vote beeps, the non-blocking timer works.
+  // If you hear NEITHER, check wiring (try swapping buzzer +/−).
+  beepSync(2, 400, 150);
+  delay(300);
 
   // ── WiFi Access Point ─────────────────────────────────────
-  // IMPORTANT: disconnect/off first, THEN set AP mode.
-  // Calling disconnect(true) after mode(WIFI_AP) would reset
-  // the mode back to WIFI_OFF — bug in some ESP8266 core builds.
-  WiFi.persistent(false);   // never write config to flash
-  WiFi.mode(WIFI_OFF);      // clean slate
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_OFF);
   delay(100);
-  WiFi.mode(WIFI_AP);       // now set Access Point mode
+  WiFi.mode(WIFI_AP);
 
   bool apOk = (strlen(AP_PASSWORD) >= 8)
               ? WiFi.softAP(AP_SSID, AP_PASSWORD)
@@ -195,7 +282,6 @@ void setup() {
 
   if (!apOk) {
     Serial.println("[WiFi] ERROR: Could not start Access Point!");
-    // Rapid error beep loop — board needs a reboot
     while (true) { beepSync(1, 100, 100); }
   }
 
@@ -209,8 +295,8 @@ void setup() {
   // ── WebSocket client ──────────────────────────────────────
   ws.begin(WS_HOST, WS_PORT, "/");
   ws.onEvent(wsEvent);
-  ws.setReconnectInterval(3000);       // retry connection every 3 s
-  ws.enableHeartbeat(15000, 3000, 2);  // ping every 15 s, timeout 3 s
+  ws.setReconnectInterval(3000);
+  ws.enableHeartbeat(15000, 3000, 2);
 
   Serial.printf("[WS] Connecting to ws://%s:%u/ ...\n", WS_HOST, WS_PORT);
   Serial.println("=================================\n");
@@ -223,19 +309,15 @@ void setup() {
 void loop() {
   uint32_t now = millis();
 
-  // Must be called every loop — drives reconnect, ping, receive
   ws.loop();
+
+  // ── Beep sequencer tick ───────────────────────────────────
+  tickBeep(now);
 
   // ── Non-blocking LED off ──────────────────────────────────
   if (ledOffAt && now >= ledOffAt) {
     ledSet(false);
     ledOffAt = 0;
-  }
-
-  // ── Non-blocking buzzer off ───────────────────────────────
-  if (buzzerOffAt && now >= buzzerOffAt) {
-    buzzerSet(false);
-    buzzerOffAt = 0;
   }
 
   // ── Status blink while disconnected (0.5 Hz slow blink) ──
@@ -247,48 +329,91 @@ void loop() {
     }
   }
 
-  // ── Vote lockout expiry ───────────────────────────────────
+  // ── 10-second lockout expiry ──────────────────────────────
   if (voteLocked && (now - lockoutStart >= VOTE_LOCKOUT_MS)) {
     voteLocked = false;
-    Serial.println("[BTN] Ready — lockout cleared");
+    Serial.println("[BTN] Ready — 10-second lockout cleared");
   }
 
-  // ── Button scan (paused during lockout) ──────────────────
-  if (!voteLocked) {
-    for (int i = 0; i < 5; i++) {
-      bool raw = digitalRead(BTNS[i]);  // LOW = pressed (pull-up active)
+  // ── Button debounce scan ──────────────────────────────────
+  for (int i = 0; i < 5; i++) {
+    bool raw = digitalRead(BTNS[i]);   // LOW = pressed (pull-up active)
 
-      // Reset debounce timer whenever the raw reading changes
-      if (raw != btnRaw[i]) {
-        btnRaw[i]       = raw;
-        btnChangedAt[i] = now;
+    if (raw != btnRaw[i]) {
+      btnRaw[i]       = raw;
+      btnChangedAt[i] = now;
+    }
+
+    if ((now - btnChangedAt[i]) >= DEBOUNCE_MS && raw != btnStable[i]) {
+      btnStable[i] = raw;
+
+      // NEW: False vote detection — pressed during lockout
+      if (raw == LOW && voteLocked) {
+        int cid = i + 1;
+        Serial.printf("[BTN] Candidate %d false vote during lockout!\n", cid);
+        if (wsConnected) sendError("false_vote_during_lockout");
+
+        // 3-second continuous alarm: one long ON step, no off phase
+        cancelBeep();
+        BeepStep alarm[] = { {3000, 0} };
+        scheduleBeep(alarm, 1);
+        ledSet(true);
+        ledOffAt = now + 3000;
+        // Do NOT restart lockout timer
       }
 
-      // Only update stable state after DEBOUNCE_MS of no change
-      if ((now - btnChangedAt[i]) >= DEBOUNCE_MS && raw != btnStable[i]) {
-        btnStable[i] = raw;
-
-        // Falling edge (HIGH→LOW) = button pressed
-        if (raw == LOW) {
-          int cid = i + 1;
-          Serial.printf("[BTN] Candidate %d pressed\n", cid);
-
-          if (wsConnected) {
-            sendVote(cid);
-            // Non-blocking vote feedback
-            ledSet(true);    buzzerSet(true);
-            ledOffAt    = now + BLINK_MS;
-            buzzerOffAt = now + BEEP_MS;
-          } else {
-            Serial.println("[BTN] Not connected — vote discarded");
-            beepSync(2, 60, 60);  // 2 short error beeps
-          }
-
-          voteLocked   = true;
-          lockoutStart = now;
-          break;  // handle only one button per loop pass
+      // NEW: Hold start — falling edge outside lockout
+      if (raw == LOW && !voteLocked) {
+        if (holdCandidate == -1) {
+          holdCandidate = i;
+          holdStartedAt = now;
+          holdFired     = false;
+          Serial.printf("[BTN] Candidate %d hold started\n", i + 1);
+          if (wsConnected) sendHoldStart(i + 1);
         }
       }
+
+      // NEW: Hold cancel — rising edge (released early)
+      if (raw == HIGH && !voteLocked) {
+        if (holdCandidate == i) {
+          if (!holdFired) {
+            Serial.printf("[BTN] Candidate %d hold cancelled\n", i + 1);
+            if (wsConnected) sendHoldCancel(i + 1);
+          }
+          holdCandidate = -1;
+          holdFired     = false;
+        }
+      }
+    }
+  }
+
+  // NEW: Hold-to-vote — fires when 2-second threshold is reached
+  if (!voteLocked && holdCandidate != -1 && !holdFired) {
+    if ((now - holdStartedAt) >= HOLD_REQUIRED_MS) {
+      int cid   = holdCandidate + 1;
+      holdFired = true;
+
+      Serial.printf("[BTN] Candidate %d CONFIRMED (held 2 s)\n", cid);
+
+      if (wsConnected) {
+        sendVote(cid);
+
+        // NEW: Two-beep confirmation pattern — 300 ms on, 100 ms off, 300 ms on
+        cancelBeep();
+        BeepStep confirm[] = { {300, 100}, {300, 0} };
+        scheduleBeep(confirm, 2);
+
+        ledSet(true);
+        ledOffAt = now + 700;   // LED on for full duration of both beeps
+      } else {
+        Serial.println("[BTN] Not connected — vote discarded");
+        beepSync(2, 60, 60);  // 2 short error beeps
+      }
+
+      voteLocked   = true;
+      lockoutStart = now;
+      holdCandidate = -1;
+      holdFired     = false;
     }
   }
 }
