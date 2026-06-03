@@ -1,5 +1,7 @@
 # ⚡ SMART EVM — Smart Electronic Voting Machine
 
+🌐 **Website:** [smart-evm.lovable.app](https://smart-evm.lovable.app/)
+
 > Made by **Ayush Raj, 8-ICSE**
 
 A complete electronic voting system built with an **ESP8266 microcontroller** and a **Windows desktop application**. Voters hold a push button for **2 continuous seconds** to cast their vote. The desktop app receives every vote instantly over Wi-Fi, counts it, updates live charts, shows a real-time lockout countdown, and can export results to Excel.
